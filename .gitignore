@@ -1,0 +1,55 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+*.xcodeproj
+Package.resolved
+
+# Built app bundle (reproducible via ./build_app.sh)
+DeepSeekBar.app/
+*.app/
+
+# Xcode / Derived data
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+
+# Debug symbols
+*.dSYM/
+
+# Secrets & credentials (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+*.mobileprovision
+*.cer
+*.cert
+secrets.*
+credentials.*
+*.secret
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+.netrc
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Editors / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.cursor/

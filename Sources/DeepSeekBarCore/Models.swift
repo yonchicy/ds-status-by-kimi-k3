@@ -1,0 +1,210 @@
+import Foundation
+
+// MARK: - 领域模型
+
+public struct BalanceSnapshot: Equatable {
+    public var currency: String
+    public var total: Double
+    public var granted: Double     // 赠送余额
+    public var toppedUp: Double    // 充值余额
+    public var isAvailable: Bool
+    public var updatedAt: Date
+
+    public var symbol: String { currency == "CNY" ? "¥" : "$" }
+}
+
+public struct DailyUsage: Equatable, Identifiable {
+    public var id: String { date }
+    public var date: String        // YYYY-MM-DD
+    public var tokens: Int
+    public var cost: Double
+    public var requests: Int
+}
+
+public struct UsageSummary: Equatable {
+    public var currency: String
+    public var todayTokens: Int
+    public var todayCost: Double
+    public var monthTokens: Int
+    public var monthCost: Double
+    public var monthRequests: Int
+    public var topModel: String?
+    public var cacheHitRate: Double?   // 本月缓存命中率 0...1
+    public var daily: [DailyUsage]
+
+    public var symbol: String { currency == "CNY" ? "¥" : "$" }
+}
+
+public extension UsageSummary {
+    /// 近 7 个自然日（含今天）的逐日用量。
+    /// API 只返回有用量的日期，缺失的日期补零，保证图表永远是整齐的 7 根柱子。
+    func last7CalendarDays(endingOn now: Date = Date()) -> [DailyUsage] {
+        let cal = Calendar.current
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        let map = Dictionary(uniqueKeysWithValues: daily.map { ($0.date, $0) })
+        return stride(from: 6, through: 0, by: -1).compactMap { back in
+            guard let date = cal.date(byAdding: .day, value: -back, to: now) else { return nil }
+            let key = f.string(from: date)
+            return map[key] ?? DailyUsage(date: key, tokens: 0, cost: 0, requests: 0)
+        }
+    }
+}
+
+public enum UsageState: Equatable {
+    case idle           // 尚未请求（未配置 platform token）
+    case loading
+    case available
+    case tokenExpired   // 40002/40003，需要重新登录
+    case unavailable(String)
+}
+
+public enum ProbeStatus: Equatable {
+    case unknown
+    case ok(latencyMs: Int)
+    case slow(latencyMs: Int)
+    case down(String)
+
+    public var label: String {
+        switch self {
+        case .unknown: return "未知"
+        case .ok(let ms): return "正常 · \(ms)ms"
+        case .slow(let ms): return "缓慢 · \(ms)ms"
+        case .down(let why): return "异常 · \(why)"
+        }
+    }
+
+    public var level: Int { // 0 未知 1 正常 2 缓慢 3 异常
+        switch self {
+        case .unknown: return 0
+        case .ok: return 1
+        case .slow: return 2
+        case .down: return 3
+        }
+    }
+}
+
+public enum StatusPageResult: Equatable {
+    case unknown
+    case unreachable
+    case noIncident       // 总体状态徽章为绿（一切运行正常）
+    case incident(String) // 总体状态徽章非绿，附带状态文字
+    case undetermined     // 页面可达但结构无法识别（FlashCat 改版时兜底）
+
+    public var label: String {
+        switch self {
+        case .unknown: return "未检查"
+        case .unreachable: return "无法访问"
+        case .noIncident: return "一切运行正常"
+        case .incident(let s): return s.isEmpty ? "存在故障/降级" : s
+        case .undetermined: return "可访问（未能判定，点击查看）"
+        }
+    }
+}
+
+// MARK: - 错误
+
+public enum DeepSeekError: LocalizedError, Equatable {
+    case missingAPIKey
+    case invalidPlatformToken
+    case httpError(Int)
+    case apiError(String)
+    case parseFailed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingAPIKey: return "未配置 API Key"
+        case .invalidPlatformToken: return "平台登录已过期，请重新登录"
+        case .httpError(let code): return "HTTP \(code)"
+        case .apiError(let msg): return msg
+        case .parseFailed(let msg): return "解析失败: \(msg)"
+        }
+    }
+
+    public static func isAuthCode(_ code: Int) -> Bool { code == 40002 || code == 40003 }
+}
+
+// MARK: - 官方余额接口响应（api.deepseek.com/user/balance）
+
+public struct BalanceResponse: Decodable {
+    public let isAvailable: Bool
+    public let balanceInfos: [BalanceInfo]
+
+    enum CodingKeys: String, CodingKey {
+        case isAvailable = "is_available"
+        case balanceInfos = "balance_infos"
+    }
+}
+
+public struct BalanceInfo: Decodable {
+    public let currency: String
+    public let totalBalance: String
+    public let grantedBalance: String
+    public let toppedUpBalance: String
+
+    enum CodingKeys: String, CodingKey {
+        case currency
+        case totalBalance = "total_balance"
+        case grantedBalance = "granted_balance"
+        case toppedUpBalance = "topped_up_balance"
+    }
+}
+
+// MARK: - 平台内部接口响应（platform.deepseek.com，防御式解析，全部字段可选）
+// 信封结构：{code, msg, data: {biz_code, biz_msg, biz_data}}
+// HTTP 状态恒为 200，成败看 code / biz_code；40002/40003 表示 token 缺失或失效。
+
+public struct AmountEnvelope: Decodable {
+    public struct Inner: Decodable {
+        public struct BizData: Decodable {
+            public struct ModelUsage: Decodable {
+                public let model: String?
+                public let usage: [Item]?
+                public struct Item: Decodable {
+                    public let type: String?
+                    public let amount: String?
+                }
+            }
+            public struct DayUsage: Decodable {
+                public let date: String?
+                public let data: [ModelUsage]?
+            }
+            public let total: [ModelUsage]?
+            public let days: [DayUsage]?
+        }
+        public let biz_code: Int?
+        public let biz_msg: String?
+        public let biz_data: BizData?
+    }
+    public let code: Int?
+    public let msg: String?
+    public let data: Inner?
+}
+
+public struct CostEnvelope: Decodable {
+    public struct Inner: Decodable {
+        public struct BizDataItem: Decodable {
+            public struct ModelUsage: Decodable {
+                public let model: String?
+                public let usage: [Item]?
+                public struct Item: Decodable {
+                    public let type: String?
+                    public let amount: String?
+                }
+            }
+            public struct DayUsage: Decodable {
+                public let date: String?
+                public let data: [ModelUsage]?
+            }
+            public let total: [ModelUsage]?
+            public let days: [DayUsage]?
+            public let currency: String?
+        }
+        public let biz_code: Int?
+        public let biz_msg: String?
+        public let biz_data: [BizDataItem]?
+    }
+    public let code: Int?
+    public let msg: String?
+    public let data: Inner?
+}
