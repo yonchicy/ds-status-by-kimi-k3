@@ -16,8 +16,9 @@ if [ -d .build/release/DeepSeekBar_DeepSeekBar.bundle ]; then
     cp -R .build/release/DeepSeekBar_DeepSeekBar.bundle "$APP_DIR/Contents/Resources/"
 fi
 
-# ad-hoc 签名，保证能从 Finder/启动台正常打开
-codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || true
+# ad-hoc 签名，保证能从 Finder/启动台正常打开，也是 SMAppService 登录项的前提。
+codesign --force --sign - "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
 
 echo "✅ 完成：$APP_DIR"
 echo "   运行：open $APP_DIR"

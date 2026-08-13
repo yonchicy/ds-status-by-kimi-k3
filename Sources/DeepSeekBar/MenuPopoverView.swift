@@ -1,4 +1,5 @@
 import DeepSeekBarCore
+import Charts
 import SwiftUI
 
 /// 菜单栏下拉弹窗主体
@@ -6,6 +7,8 @@ struct MenuPopoverView: View {
     @EnvironmentObject var state: AppState
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
+    @State private var hoveredTodayUsageSample: TodayUsageSample?
+    @State private var hoveredDailyUsage: DailyUsage?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -19,6 +22,7 @@ struct MenuPopoverView: View {
         }
         .padding(14)
         .frame(width: 320)
+        .onAppear { state.refreshForPresentation() }
     }
 
     // MARK: - 余额
@@ -119,36 +123,249 @@ struct MenuPopoverView: View {
             }
             .font(.callout)
 
+            todayUsageChart
+
             if !u.daily.isEmpty {
                 chartView(u.last7CalendarDays())
             }
         }
     }
 
+    /// DeepSeek 只返回当日累计值；此图按 App 每次成功刷新的时间采样。
+    private var todayUsageChart: some View {
+        let samples = state.todayUsageSamples
+        let hoveredSample = hoveredTodayUsageSample.flatMap { selected in
+            samples.first { $0.id == selected.id }
+        }
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("今日累计 Token")
+                Spacer(minLength: 8)
+                if let hoveredSample {
+                    Text("\(timeLabel(hoveredSample.timestamp)) · \(exactTokenLabel(hoveredSample.tokens))")
+                        .foregroundStyle(.primary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                } else {
+                    Text("按刷新时间采样")
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if samples.isEmpty {
+                Text("成功刷新后开始记录今日趋势")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .center)
+            } else {
+                todayUsageLineChart(samples)
+            }
+        }
+    }
+
+    private func todayUsageLineChart(_ samples: [TodayUsageSample]) -> some View {
+        let maxTokens = samples.map(\.tokens).max() ?? 0
+        let yMax = max(Double(maxTokens) * 1.08, 1)
+        let hoveredSample = hoveredTodayUsageSample.flatMap { selected in
+            samples.first { $0.id == selected.id }
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .autoupdatingCurrent
+        let latestTime = samples.last?.timestamp ?? Date()
+        let startOfDay = calendar.startOfDay(for: latestTime)
+        let domainEnd = max(latestTime, startOfDay.addingTimeInterval(60 * 60))
+
+        return Chart {
+            ForEach(samples) { sample in
+                AreaMark(
+                    x: .value("时间", sample.timestamp),
+                    yStart: .value("基线", 0),
+                    yEnd: .value("Token", Double(sample.tokens)))
+                    .interpolationMethod(.stepEnd)
+                    .foregroundStyle(Color.accentColor.opacity(0.10))
+
+                LineMark(
+                    x: .value("时间", sample.timestamp),
+                    y: .value("Token", Double(sample.tokens)))
+                    .interpolationMethod(.stepEnd)
+                    .foregroundStyle(Color.accentColor)
+                    .lineStyle(StrokeStyle(lineWidth: 1.8))
+            }
+
+            if let latest = samples.last {
+                PointMark(
+                    x: .value("时间", latest.timestamp),
+                    y: .value("Token", Double(latest.tokens)))
+                    .foregroundStyle(Color.accentColor)
+                    .symbolSize(22)
+            }
+
+            if let hoveredSample {
+                RuleMark(x: .value("悬停时间", hoveredSample.timestamp))
+                    .foregroundStyle(Color.secondary.opacity(0.35))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+
+                PointMark(
+                    x: .value("悬停时间", hoveredSample.timestamp),
+                    y: .value("悬停 Token", Double(hoveredSample.tokens)))
+                    .foregroundStyle(Color.accentColor)
+                    .symbolSize(42)
+            }
+        }
+        .chartXScale(domain: startOfDay...domainEnd)
+        .chartYScale(domain: 0...yMax)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 3)) { _ in
+                AxisGridLine().foregroundStyle(.quaternary)
+                AxisValueLabel(format: .dateTime.hour().minute())
+                    .font(.system(size: 8))
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                AxisGridLine().foregroundStyle(.quaternary)
+                AxisValueLabel {
+                    if let tokens = value.as(Double.self) {
+                        Text(AppState.formatTokens(Int(tokens)))
+                            .font(.system(size: 8))
+                    }
+                }
+            }
+        }
+        .chartOverlay { chartProxy in
+            GeometryReader { geometry in
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            guard let plotFrameAnchor = chartProxy.plotFrame else {
+                                if hoveredTodayUsageSample != nil {
+                                    hoveredTodayUsageSample = nil
+                                }
+                                return
+                            }
+                            let plotFrame = geometry[plotFrameAnchor]
+                            guard plotFrame.contains(location),
+                                  let timestamp: Date = chartProxy.value(
+                                    atX: location.x - plotFrame.minX
+                                  ) else {
+                                if hoveredTodayUsageSample != nil {
+                                    hoveredTodayUsageSample = nil
+                                }
+                                return
+                            }
+                            let nearest = nearestSample(
+                                to: timestamp,
+                                in: samples
+                            )
+                            if hoveredTodayUsageSample?.id != nearest?.id {
+                                hoveredTodayUsageSample = nearest
+                            }
+                        case .ended:
+                            if hoveredTodayUsageSample != nil {
+                                hoveredTodayUsageSample = nil
+                            }
+                        }
+                    }
+            }
+        }
+        .frame(height: 92)
+        .accessibilityLabel("今日累计 Token 趋势")
+        .accessibilityValue(
+            hoveredSample.map {
+                "\(timeLabel($0.timestamp))，\(exactTokenLabel($0.tokens))"
+            } ?? "最新 \(exactTokenLabel(samples.last?.tokens ?? 0))"
+        )
+    }
+
     /// 近 7 日 tokens 迷你柱状图
     private func chartView(_ days: [DailyUsage]) -> some View {
         let maxTokens = max(days.map(\.tokens).max() ?? 1, 1)
+        let hoveredDay = hoveredDailyUsage.flatMap { selected in
+            days.first { $0.id == selected.id }
+        }
         return VStack(alignment: .leading, spacing: 4) {
-            Text("近 7 日用量").font(.caption).foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline) {
+                Text("近 7 日用量")
+                Spacer(minLength: 8)
+                if let hoveredDay {
+                    Text("\(dayLabel(hoveredDay.date)) · \(exactTokenLabel(hoveredDay.tokens))")
+                        .foregroundStyle(.primary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                } else {
+                    Text("悬停查看详情")
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
             HStack(alignment: .bottom, spacing: 5) {
                 ForEach(days) { day in
+                    let isHovered = hoveredDailyUsage?.id == day.id
                     VStack(spacing: 2) {
+                        Spacer(minLength: 0)
                         RoundedRectangle(cornerRadius: 2)
-                            .fill(Color.accentColor.opacity(0.8))
+                            .fill(Color.accentColor.opacity(isHovered ? 1 : 0.72))
                             .frame(height: max(2, 44 * CGFloat(day.tokens) / CGFloat(maxTokens)))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .stroke(
+                                        Color.primary.opacity(isHovered ? 0.28 : 0),
+                                        lineWidth: 1
+                                    )
+                            }
                         Text(dayLabel(day.date))
                             .font(.system(size: 8))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(isHovered ? .primary : .tertiary)
                     }
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onHover { isInside in
+                        if isInside {
+                            hoveredDailyUsage = day
+                        } else if hoveredDailyUsage?.id == day.id {
+                            hoveredDailyUsage = nil
+                        }
+                    }
+                    .help("\(dayLabel(day.date)) · \(exactTokenLabel(day.tokens))")
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(day.date)
+                    .accessibilityValue(exactTokenLabel(day.tokens))
                 }
             }
             .frame(height: 60)
+            .animation(.easeOut(duration: 0.12), value: hoveredDailyUsage?.id)
         }
     }
 
     private func dayLabel(_ date: String) -> String {
         String(date.suffix(5)).replacingOccurrences(of: "-", with: "/")
+    }
+
+    private func timeLabel(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .shortened)
+    }
+
+    private func exactTokenLabel(_ tokens: Int) -> String {
+        "\(tokens.formatted(.number.grouping(.automatic))) tokens"
+    }
+
+    private func nearestSample(
+        to timestamp: Date,
+        in samples: [TodayUsageSample]
+    ) -> TodayUsageSample? {
+        samples.min {
+            abs($0.timestamp.timeIntervalSince(timestamp))
+                < abs($1.timestamp.timeIntervalSince(timestamp))
+        }
     }
 
     // MARK: - 服务状态

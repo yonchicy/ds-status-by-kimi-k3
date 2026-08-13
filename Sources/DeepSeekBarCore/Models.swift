@@ -1,6 +1,100 @@
 import Foundation
 
+enum UsageDate {
+    static func calendar(timeZone: TimeZone) -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        return calendar
+    }
+
+    static func key(for date: Date, timeZone: TimeZone) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar(timeZone: timeZone)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+}
+
 // MARK: - 领域模型
+
+/// 应用成功刷新时记录的“今日累计 token”快照。
+public struct TodayUsageSample: Codable, Equatable, Identifiable, Sendable {
+    public var id: Date { timestamp }
+    public var timestamp: Date
+    public var tokens: Int
+
+    public init(timestamp: Date, tokens: Int) {
+        self.timestamp = timestamp
+        self.tokens = tokens
+    }
+}
+
+/// 仅保留当前自然日的累计 token 刷新采样，可直接序列化到 UserDefaults。
+public struct TodayUsageSeries: Codable, Equatable, Sendable {
+    public private(set) var dayKey: String?
+    public private(set) var samples: [TodayUsageSample]
+
+    public init(dayKey: String? = nil, samples: [TodayUsageSample] = []) {
+        self.dayKey = dayKey
+        self.samples = samples.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    public static func dayKey(for date: Date, timeZone: TimeZone = .current) -> String {
+        UsageDate.key(for: date, timeZone: timeZone)
+    }
+
+    /// 丢弃其他日期的采样。返回 true 表示序列发生了变化。
+    @discardableResult
+    public mutating func retainDay(containing date: Date,
+                                   timeZone: TimeZone = .current) -> Bool {
+        let expectedKey = Self.dayKey(for: date, timeZone: timeZone)
+        let retained: [TodayUsageSample]
+        if dayKey == expectedKey {
+            retained = samples.filter {
+                Self.dayKey(for: $0.timestamp, timeZone: timeZone) == expectedKey
+            }
+        } else {
+            retained = []
+        }
+
+        let changed = dayKey != expectedKey || retained != samples
+        dayKey = expectedKey
+        samples = retained
+        return changed
+    }
+
+    /// 同一分钟内只保留最后一次刷新；跨分钟则追加，以便折线显示平台段。
+    public mutating func record(tokens: Int,
+                                at timestamp: Date,
+                                timeZone: TimeZone = .current,
+                                maxSamples: Int = 1_500) {
+        retainDay(containing: timestamp, timeZone: timeZone)
+        let calendar = UsageDate.calendar(timeZone: timeZone)
+        let sample = TodayUsageSample(timestamp: timestamp, tokens: max(tokens, 0))
+
+        if let index = samples.lastIndex(where: {
+            calendar.isDate($0.timestamp, equalTo: timestamp, toGranularity: .minute)
+        }) {
+            samples[index] = sample
+        } else {
+            samples.append(sample)
+        }
+        samples.sort { $0.timestamp < $1.timestamp }
+
+        let limit = max(maxSamples, 1)
+        if samples.count > limit {
+            samples.removeFirst(samples.count - limit)
+        }
+    }
+
+    public mutating func clear(at date: Date = Date(),
+                               timeZone: TimeZone = .current) {
+        dayKey = Self.dayKey(for: date, timeZone: timeZone)
+        samples.removeAll(keepingCapacity: false)
+    }
+}
 
 public struct BalanceSnapshot: Equatable {
     public var currency: String
@@ -38,14 +132,13 @@ public struct UsageSummary: Equatable {
 public extension UsageSummary {
     /// 近 7 个自然日（含今天）的逐日用量。
     /// API 只返回有用量的日期，缺失的日期补零，保证图表永远是整齐的 7 根柱子。
-    func last7CalendarDays(endingOn now: Date = Date()) -> [DailyUsage] {
-        let cal = Calendar.current
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
+    func last7CalendarDays(endingOn now: Date = Date(),
+                           timeZone: TimeZone = .current) -> [DailyUsage] {
+        let cal = UsageDate.calendar(timeZone: timeZone)
         let map = Dictionary(uniqueKeysWithValues: daily.map { ($0.date, $0) })
         return stride(from: 6, through: 0, by: -1).compactMap { back in
             guard let date = cal.date(byAdding: .day, value: -back, to: now) else { return nil }
-            let key = f.string(from: date)
+            let key = UsageDate.key(for: date, timeZone: timeZone)
             return map[key] ?? DailyUsage(date: key, tokens: 0, cost: 0, requests: 0)
         }
     }

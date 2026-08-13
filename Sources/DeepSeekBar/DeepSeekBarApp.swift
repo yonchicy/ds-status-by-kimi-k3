@@ -3,10 +3,12 @@ import AppKit
 
 /// 菜单栏鲸鱼图标（DeepSeek 官方 logo，template 模式随系统外观自适应）
 enum WhaleIcon {
+    static let pointSize: CGFloat = 16
+
     static let image: NSImage? = {
         guard let url = Bundle.module.url(forResource: "whale", withExtension: "png"),
               let img = NSImage(contentsOf: url) else { return nil }
-        img.size = NSSize(width: 19, height: 19)
+        img.size = NSSize(width: pointSize, height: pointSize)
         img.isTemplate = true
         return img
     }()
@@ -25,6 +27,10 @@ struct DeepSeekBarApp: App {
             HStack(spacing: 4) {
                 if let whale = WhaleIcon.image {
                     Image(nsImage: whale)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .frame(width: WhaleIcon.pointSize, height: WhaleIcon.pointSize)
                 }
                 Text(state.menuLabel)
             }

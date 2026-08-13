@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SettingsView: View {
@@ -7,6 +8,7 @@ struct SettingsView: View {
     @State private var apiKeyInput = ""
     @State private var tokenInput = ""
     @State private var savedHint = false
+    @StateObject private var loginItem = LoginItemController()
 
     var body: some View {
         Form {
@@ -43,6 +45,39 @@ struct SettingsView: View {
                         value: $state.refreshIntervalMinutes, in: 1...60)
             }
 
+            Section("启动") {
+                Toggle("登录时自动启动", isOn: Binding(
+                    get: { loginItem.isEnabled },
+                    set: { loginItem.setEnabled($0) }))
+                    .disabled(!loginItem.canToggle)
+
+                switch loginItem.state {
+                case .requiresApproval:
+                    Text("已注册，但需要在系统设置的“登录项”中允许。")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Button("打开系统登录项设置") {
+                        loginItem.openSystemSettings()
+                    }
+                case .notFound:
+                    Text("请先完成打包，并从 DeepSeekBar.app 启动后再开启此选项。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .enabled:
+                    Text("已加入 macOS 系统登录项。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .notRegistered:
+                    EmptyView()
+                }
+
+                if let error = loginItem.errorMessage {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
             Section {
                 HStack {
                     Button("保存") { save() }
@@ -64,6 +99,11 @@ struct SettingsView: View {
         .frame(width: 460)
         .onAppear {
             apiKeyInput = state.apiKey ?? ""
+            loginItem.refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in
+            loginItem.refresh()
         }
     }
 

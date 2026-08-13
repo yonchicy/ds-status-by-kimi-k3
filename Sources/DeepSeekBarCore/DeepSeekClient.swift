@@ -6,21 +6,27 @@ import Foundation
 public struct DeepSeekClient: Sendable {
     public static let shared = DeepSeekClient()
 
+    public typealias DataLoader = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
     private let balanceURL = URL(string: "https://api.deepseek.com/user/balance")!
     private let modelsURL = URL(string: "https://api.deepseek.com/models")!
     private let amountURL = URL(string: "https://platform.deepseek.com/api/v0/usage/amount")!
     private let costURL = URL(string: "https://platform.deepseek.com/api/v0/usage/cost")!
     private let statusPageURL = URL(string: "https://status.deepseek.com/")!
 
-    private let timeout: TimeInterval = 12
     private let browserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    private let loadData: DataLoader
 
-    public init() {}
-
-    private var session: URLSession {
+    public init() {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = timeout
-        return URLSession(configuration: config)
+        config.timeoutIntervalForRequest = 12
+        let session = URLSession(configuration: config)
+        loadData = { request in try await session.data(for: request) }
+    }
+
+    /// 注入网络加载器，用于离线验证完整的请求与聚合链路。
+    public init(dataLoader: @escaping DataLoader) {
+        loadData = dataLoader
     }
 
     // MARK: - 余额（官方接口，API Key）
@@ -30,7 +36,7 @@ public struct DeepSeekClient: Sendable {
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await loadData(req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
         guard code == 200 else {
             if code == 401 { throw DeepSeekError.apiError("API Key 无效或已过期") }
@@ -78,18 +84,69 @@ public struct DeepSeekClient: Sendable {
         }
     }
 
-    /// 拉取本月用量 + 消费并聚合（两个请求并发）
-    public func fetchUsageSummary(platformToken token: String, now: Date = Date()) async throws -> UsageSummary {
-        let (month, year) = Self.currentMonthYear(now)
-        async let amountReq = fetchAmount(token: token, month: month, year: year)
-        async let costReq = fetchCost(token: token, month: month, year: year)
+    /// 拉取本月用量 + 消费并聚合；月初额外拉取上月，以覆盖完整的近 7 个自然日。
+    public func fetchUsageSummary(platformToken token: String,
+                                  now: Date = Date(),
+                                  timeZone: TimeZone = .current) async throws -> UsageSummary {
+        let current = Self.currentMonthYear(now, timeZone: timeZone)
+        async let amountReq = fetchAmount(token: token, month: current.month, year: current.year)
+        async let costReq = fetchCost(token: token, month: current.month, year: current.year)
+
+        let periods = Self.usageMonthsCoveringLast7Days(endingOn: now, timeZone: timeZone)
+        guard let history = periods.first(where: {
+            $0.month != current.month || $0.year != current.year
+        }) else {
+            let (amount, cost) = try await (amountReq, costReq)
+            return Self.aggregate(amount: amount, cost: cost, now: now, timeZone: timeZone)
+        }
+
+        async let historyAmountReq = fetchAmount(token: token, month: history.month, year: history.year)
         let (amount, cost) = try await (amountReq, costReq)
-        return Self.aggregate(amount: amount, cost: cost, now: now)
+        do {
+            let historyAmount = try await historyAmountReq
+            return Self.aggregate(
+                amount: amount,
+                cost: cost,
+                historicalAmounts: [historyAmount],
+                now: now,
+                timeZone: timeZone)
+        } catch DeepSeekError.invalidPlatformToken {
+            throw DeepSeekError.invalidPlatformToken
+        } catch {
+            if error is CancellationError { throw error }
+            if let urlError = error as? URLError, urlError.code == .cancelled { throw error }
+            // 历史月份失败时仍保留当月摘要，图表中缺失日期会按既有逻辑补零。
+            return Self.aggregate(amount: amount, cost: cost, now: now, timeZone: timeZone)
+        }
     }
 
-    public static func currentMonthYear(_ now: Date = Date()) -> (month: Int, year: Int) {
-        let c = Calendar.current.dateComponents([.month, .year], from: now)
+    public static func currentMonthYear(_ now: Date = Date(),
+                                        timeZone: TimeZone = .current) -> (month: Int, year: Int) {
+        let calendar = UsageDate.calendar(timeZone: timeZone)
+        let c = calendar.dateComponents([.month, .year], from: now)
         return (c.month ?? 1, c.year ?? 1970)
+    }
+
+    /// 查询近 7 个自然日所跨越的月份，按时间从早到晚排列。
+    /// 7 日窗口最多跨两个月；显式按 Gregorian 计算，避免用户日历设置改变 API 参数。
+    public static func usageMonthsCoveringLast7Days(
+        endingOn now: Date = Date(),
+        timeZone: TimeZone = .current
+    ) -> [(month: Int, year: Int)] {
+        let calendar = UsageDate.calendar(timeZone: timeZone)
+        var seen = Set<Int>()
+        var result: [(month: Int, year: Int)] = []
+
+        for daysBack in stride(from: 6, through: 0, by: -1) {
+            guard let date = calendar.date(byAdding: .day, value: -daysBack, to: now) else { continue }
+            let c = calendar.dateComponents([.month, .year], from: date)
+            guard let month = c.month, let year = c.year else { continue }
+            let key = year * 100 + month
+            if seen.insert(key).inserted {
+                result.append((month: month, year: year))
+            }
+        }
+        return result
     }
 
     private func platformRequest(url: URL, token: String, month: Int, year: Int) -> URLRequest {
@@ -117,7 +174,7 @@ public struct DeepSeekClient: Sendable {
 
     private func fetchAmount(token: String, month: Int, year: Int) async throws -> AmountEnvelope.Inner.BizData {
         let req = platformRequest(url: amountURL, token: token, month: month, year: year)
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await loadData(req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
         guard status == 200 else {
             if status == 401 || status == 403 { throw DeepSeekError.invalidPlatformToken }
@@ -133,7 +190,7 @@ public struct DeepSeekClient: Sendable {
 
     private func fetchCost(token: String, month: Int, year: Int) async throws -> CostEnvelope.Inner.BizDataItem {
         let req = platformRequest(url: costURL, token: token, month: month, year: year)
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await loadData(req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
         guard status == 200 else {
             if status == 401 || status == 403 { throw DeepSeekError.invalidPlatformToken }
@@ -167,13 +224,11 @@ public struct DeepSeekClient: Sendable {
 
     public static func aggregate(amount: AmountEnvelope.Inner.BizData,
                                  cost: CostEnvelope.Inner.BizDataItem,
-                                 now: Date) -> UsageSummary {
+                                 historicalAmounts: [AmountEnvelope.Inner.BizData] = [],
+                                 now: Date,
+                                 timeZone: TimeZone = .current) -> UsageSummary {
         let currency = cost.currency ?? "CNY"
-        let todayString: String = {
-            let f = DateFormatter()
-            f.dateFormat = "yyyy-MM-dd"
-            return f.string(from: now)
-        }()
+        let todayString = UsageDate.key(for: now, timeZone: timeZone)
 
         // 今日
         var todayTokens = 0, todayRequests = 0, todayCost = 0.0
@@ -224,16 +279,18 @@ public struct DeepSeekClient: Sendable {
 
         // 逐日（amount 与 cost 按日期合并）
         var daily: [String: DailyUsage] = [:]
-        for d in amount.days ?? [] {
-            guard let date = d.date else { continue }
-            var tokens = 0, requests = 0
-            for m in d.data ?? [] {
-                for u in m.usage ?? [] {
-                    if Self.isTokenType(u.type) { tokens += Int(u.amount ?? "") ?? 0 }
-                    if Self.isRequestType(u.type) { requests += Int(u.amount ?? "") ?? 0 }
+        for source in historicalAmounts + [amount] {
+            for d in source.days ?? [] {
+                guard let date = d.date else { continue }
+                var tokens = 0, requests = 0
+                for m in d.data ?? [] {
+                    for u in m.usage ?? [] {
+                        if Self.isTokenType(u.type) { tokens += Int(u.amount ?? "") ?? 0 }
+                        if Self.isRequestType(u.type) { requests += Int(u.amount ?? "") ?? 0 }
+                    }
                 }
+                daily[date] = DailyUsage(date: date, tokens: tokens, cost: 0, requests: requests)
             }
-            daily[date] = DailyUsage(date: date, tokens: tokens, cost: 0, requests: requests)
         }
         for d in cost.days ?? [] {
             guard let date = d.date else { continue }
@@ -275,7 +332,7 @@ public struct DeepSeekClient: Sendable {
         }
         let start = Date()
         do {
-            let (_, resp) = try await session.data(for: req)
+            let (_, resp) = try await loadData(req)
             let ms = Int(Date().timeIntervalSince(start) * 1000)
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             switch status {
@@ -304,7 +361,7 @@ public struct DeepSeekClient: Sendable {
         req.setValue(browserUA, forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 8
         do {
-            let (data, resp) = try await session.data(for: req)
+            let (data, resp) = try await loadData(req)
             guard (200..<300).contains((resp as? HTTPURLResponse)?.statusCode ?? -1) else {
                 return .unreachable
             }
