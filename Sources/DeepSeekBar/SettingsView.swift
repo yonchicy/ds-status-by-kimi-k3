@@ -45,6 +45,21 @@ struct SettingsView: View {
                         value: $state.refreshIntervalMinutes, in: 1...60)
             }
 
+            Section {
+                Picker("外观", selection: $state.appearancePreference) {
+                    ForEach(AppearancePreference.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text("跟随系统时，会随 macOS 浅色 / 深色外观自动切换。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("外观")
+            }
+
             Section("启动") {
                 Toggle("登录时自动启动", isOn: Binding(
                     get: { loginItem.isEnabled },

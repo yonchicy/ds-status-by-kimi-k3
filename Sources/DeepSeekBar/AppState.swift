@@ -24,6 +24,14 @@ final class AppState: ObservableObject {
         }
     }
 
+    @Published var appearancePreference: AppearancePreference {
+        didSet {
+            UserDefaults.standard.set(
+                appearancePreference.rawValue,
+                forKey: AppearancePreference.storageKey)
+        }
+    }
+
     private let client = DeepSeekClient.shared
     private var timer: Timer?
     private var cancellables = Set<AnyCancellable>()
@@ -42,6 +50,8 @@ final class AppState: ObservableObject {
     init() {
         let saved = UserDefaults.standard.integer(forKey: "refreshIntervalMinutes")
         refreshIntervalMinutes = saved > 0 ? saved : 5
+        appearancePreference = AppearancePreference.load()
+        appearancePreference.applyToApp()
         loadTodayUsageSeries()
         observeCalendarChanges()
         restartTimer()
