@@ -222,6 +222,33 @@ public struct DeepSeekClient: Sendable {
         type?.uppercased() == "REQUEST"
     }
 
+    private enum UsageModelFamily {
+        case flash
+        case pro
+        case other
+    }
+
+    /// 平台用量接口没有公开模型字段契约，因此仅识别官方模型 ID 及明确的兼容别名。
+    /// 未知值仍计入总量，但不会被误归到 Flash 或 Pro。
+    private static func usageModelFamily(_ rawModel: String?) -> UsageModelFamily {
+        guard let model = rawModel?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(), !model.isEmpty else {
+            return .other
+        }
+
+        if model == "deepseek-v4-pro" || model.hasPrefix("deepseek-v4-pro[") {
+            return .pro
+        }
+        if model == "deepseek-v4-flash"
+            || model.hasPrefix("deepseek-v4-flash[")
+            || model == "deepseek-chat"
+            || model == "deepseek-reasoner" {
+            return .flash
+        }
+        return .other
+    }
+
     public static func aggregate(amount: AmountEnvelope.Inner.BizData,
                                  cost: CostEnvelope.Inner.BizDataItem,
                                  historicalAmounts: [AmountEnvelope.Inner.BizData] = [],
@@ -232,18 +259,38 @@ public struct DeepSeekClient: Sendable {
 
         // 今日
         var todayTokens = 0, todayRequests = 0, todayCost = 0.0
-        if let day = (amount.days ?? []).first(where: { $0.date == todayString }) {
+        var todayFlashUsage = TodayModelUsage()
+        var todayProUsage = TodayModelUsage()
+        for day in amount.days ?? [] where day.date == todayString {
             for m in day.data ?? [] {
+                var modelTokens = 0
                 for u in m.usage ?? [] {
-                    if Self.isTokenType(u.type) { todayTokens += Int(u.amount ?? "") ?? 0 }
+                    if Self.isTokenType(u.type) {
+                        let tokens = Int(u.amount ?? "") ?? 0
+                        todayTokens += tokens
+                        modelTokens += tokens
+                    }
                     if Self.isRequestType(u.type) { todayRequests += Int(u.amount ?? "") ?? 0 }
+                }
+                switch Self.usageModelFamily(m.model) {
+                case .flash: todayFlashUsage.tokens += modelTokens
+                case .pro: todayProUsage.tokens += modelTokens
+                case .other: break
                 }
             }
         }
-        if let day = (cost.days ?? []).first(where: { $0.date == todayString }) {
+        for day in cost.days ?? [] where day.date == todayString {
             for m in day.data ?? [] {
+                var modelCost = 0.0
                 for u in m.usage ?? [] where Self.isTokenType(u.type) {
-                    todayCost += Double(u.amount ?? "") ?? 0
+                    let itemCost = Double(u.amount ?? "") ?? 0
+                    todayCost += itemCost
+                    modelCost += itemCost
+                }
+                switch Self.usageModelFamily(m.model) {
+                case .flash: todayFlashUsage.cost += modelCost
+                case .pro: todayProUsage.cost += modelCost
+                case .other: break
                 }
             }
         }
@@ -313,6 +360,8 @@ public struct DeepSeekClient: Sendable {
             currency: currency,
             todayTokens: todayTokens,
             todayCost: todayCost,
+            todayFlashUsage: todayFlashUsage,
+            todayProUsage: todayProUsage,
             monthTokens: monthTokens,
             monthCost: monthCost,
             monthRequests: monthRequests,

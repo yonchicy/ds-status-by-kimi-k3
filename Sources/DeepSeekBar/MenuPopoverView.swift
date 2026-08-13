@@ -101,6 +101,14 @@ struct MenuPopoverView: View {
                         .gridColumnAlignment(.trailing)
                 }
                 GridRow {
+                    Text("今日 Flash").foregroundStyle(.secondary)
+                    modelUsageText(u.todayFlashUsage, symbol: u.symbol)
+                }
+                GridRow {
+                    Text("今日 Pro").foregroundStyle(.secondary)
+                    modelUsageText(u.todayProUsage, symbol: u.symbol)
+                }
+                GridRow {
                     Text("本月消费").foregroundStyle(.secondary)
                     Text("\(u.symbol)\(u.monthCost, specifier: "%.4f") · \(AppState.formatTokens(u.monthTokens)) tokens")
                 }
@@ -356,6 +364,10 @@ struct MenuPopoverView: View {
 
     private func exactTokenLabel(_ tokens: Int) -> String {
         "\(tokens.formatted(.number.grouping(.automatic))) tokens"
+    }
+
+    private func modelUsageText(_ usage: TodayModelUsage, symbol: String) -> Text {
+        Text("\(symbol)\(usage.cost, specifier: "%.4f") · \(AppState.formatTokens(usage.tokens)) tokens")
     }
 
     private func nearestSample(

@@ -115,10 +115,22 @@ public struct DailyUsage: Equatable, Identifiable {
     public var requests: Int
 }
 
+public struct TodayModelUsage: Equatable, Sendable {
+    public var tokens: Int
+    public var cost: Double
+
+    public init(tokens: Int = 0, cost: Double = 0) {
+        self.tokens = tokens
+        self.cost = cost
+    }
+}
+
 public struct UsageSummary: Equatable {
     public var currency: String
     public var todayTokens: Int
     public var todayCost: Double
+    public var todayFlashUsage: TodayModelUsage
+    public var todayProUsage: TodayModelUsage
     public var monthTokens: Int
     public var monthCost: Double
     public var monthRequests: Int

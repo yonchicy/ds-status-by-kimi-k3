@@ -84,11 +84,21 @@ let amountJSON = """
       ],
       "days": [
         {"date": "\(today)", "data": [
-          {"model": "deepseek-chat", "usage": [
-            {"type": "PROMPT_CACHE_HIT_TOKEN", "amount": "80"},
-            {"type": "PROMPT_CACHE_MISS_TOKEN", "amount": "20"},
-            {"type": "RESPONSE_TOKEN", "amount": "50"},
-            {"type": "REQUEST", "amount": "2"}
+          {"model": " DeepSeek-V4-Flash ", "usage": [
+            {"type": "PROMPT_CACHE_HIT_TOKEN", "amount": "50"},
+            {"type": "RESPONSE_TOKEN", "amount": "30"},
+            {"type": "REQUEST", "amount": "1"}
+          ]},
+          {"model": "deepseek-reasoner", "usage": [
+            {"type": "PROMPT_CACHE_MISS_TOKEN", "amount": "20"}
+          ]},
+          {"model": "deepseek-v4-pro[1m]", "usage": [
+            {"type": "PROMPT_CACHE_MISS_TOKEN", "amount": "15"},
+            {"type": "RESPONSE_TOKEN", "amount": "25"},
+            {"type": "REQUEST", "amount": "1"}
+          ]},
+          {"model": "future-model", "usage": [
+            {"type": "RESPONSE_TOKEN", "amount": "10"}
           ]}
         ]}
       ]
@@ -114,9 +124,19 @@ let costJSON = """
         ],
         "days": [
           {"date": "\(today)", "data": [
-            {"model": "deepseek-chat", "usage": [
+            {"model": "deepseek-v4-pro[1m]", "usage": [
+              {"type": "PROMPT_CACHE_MISS_TOKEN", "amount": "0.0003"},
+              {"type": "RESPONSE_TOKEN", "amount": "0.0005"}
+            ]},
+            {"model": "DEEPSEEK-V4-FLASH", "usage": [
               {"type": "PROMPT_CACHE_HIT_TOKEN", "amount": "0.0010"},
-              {"type": "RESPONSE_TOKEN", "amount": "0.0020"}
+              {"type": "RESPONSE_TOKEN", "amount": "0.0005"}
+            ]},
+            {"model": "deepseek-chat", "usage": [
+              {"type": "RESPONSE_TOKEN", "amount": "0.0005"}
+            ]},
+            {"model": "future-model", "usage": [
+              {"type": "RESPONSE_TOKEN", "amount": "0.0002"}
             ]}
           ]}
         ]
@@ -134,8 +154,18 @@ do {
     }
     let s = DeepSeekClient.aggregate(amount: amountBiz, cost: costBiz, now: Date())
     check(s.currency == "CNY", "币种")
-    check(s.todayTokens == 150, "今日 tokens", "实际 \(s.todayTokens)")           // 80+20+50
+    check(s.todayTokens == 150, "今日 tokens", "实际 \(s.todayTokens)")
     check(approx(s.todayCost, 0.003), "今日消费", "实际 \(s.todayCost)")
+    check(s.todayFlashUsage.tokens == 100, "今日 Flash tokens", "实际 \(s.todayFlashUsage.tokens)")
+    check(approx(s.todayFlashUsage.cost, 0.002), "今日 Flash 消费", "实际 \(s.todayFlashUsage.cost)")
+    check(s.todayProUsage.tokens == 40, "今日 Pro tokens", "实际 \(s.todayProUsage.tokens)")
+    check(approx(s.todayProUsage.cost, 0.0008), "今日 Pro 消费", "实际 \(s.todayProUsage.cost)")
+    check(
+        s.todayFlashUsage.tokens + s.todayProUsage.tokens < s.todayTokens,
+        "未知模型只计入今日总量")
+    check(
+        s.todayFlashUsage.cost + s.todayProUsage.cost < s.todayCost,
+        "未知模型消费只计入今日总额")
     check(s.monthTokens == 2000, "本月 tokens", "实际 \(s.monthTokens)")          // 800+200+500+100+100+300
     check(s.monthRequests == 10, "本月请求数", "实际 \(s.monthRequests)")         // 7+3
     check(approx(s.monthCost, 0.034), "本月消费", "实际 \(s.monthCost)")
