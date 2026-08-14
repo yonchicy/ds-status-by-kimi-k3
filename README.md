@@ -10,6 +10,22 @@ macOS 菜单栏小工具：一眼看清 DeepSeek 账户余额、消费用量与�
   - 服务状态：API 主动探测（正常/缓慢/异常 + 延迟）+ 官方状态页（status.deepseek.com）结论与链接
 - **自动刷新**：默认每 5 分钟（设置里可调 1–60 分钟）
 
+## 界面预览
+
+### 菜单栏
+
+<p align="center">
+  <img src="docs/images/deepseekbar-menu-bar.png" width="264" alt="DeepSeekBar 菜单栏鲸鱼图标与用量摘要">
+</p>
+
+### 弹出面板
+
+<p align="center">
+  <img src="docs/images/deepseekbar-overview-redacted.png" width="420" alt="DeepSeekBar 下拉弹窗，账户与用量数据已脱敏">
+</p>
+
+> 弹出面板截图中的账户、消费与用量数据均已脱敏；菜单栏截图按原图展示。
+
 ## 构建与运行
 
 无需 Xcode，只需 Command Line Tools（`xcode-select --install`）：
