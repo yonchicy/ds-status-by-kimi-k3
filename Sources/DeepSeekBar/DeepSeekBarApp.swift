@@ -1,3 +1,4 @@
+import DeepSeekBarCore
 import SwiftUI
 import AppKit
 
@@ -12,11 +13,63 @@ enum WhaleIcon {
         img.isTemplate = true
         return img
     }()
+
+    private static let warningImage = tintedImage(.systemOrange)
+    private static let errorImage = tintedImage(.systemRed)
+
+    static func coloredImage(for probe: ProbeStatus) -> NSImage? {
+        switch probe {
+        case .slow: return warningImage
+        case .down: return errorImage
+        case .unknown, .ok: return nil
+        }
+    }
+
+    private static func tintedImage(_ color: NSColor) -> NSImage? {
+        guard let mask = image?.copy() as? NSImage else { return nil }
+        mask.isTemplate = false
+        let sourceRect = NSRect(origin: .zero, size: mask.size)
+
+        let tinted = NSImage(size: mask.size, flipped: false) { destinationRect in
+            NSGraphicsContext.saveGraphicsState()
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            NSGraphicsContext.current?.imageInterpolation = .high
+
+            color.setFill()
+            destinationRect.fill()
+            mask.draw(
+                in: destinationRect,
+                from: sourceRect,
+                operation: .destinationIn,
+                fraction: 1
+            )
+            return true
+        }
+        tinted.isTemplate = false
+        tinted.cacheMode = .never
+        return tinted
+    }
 }
 
 @main
 struct DeepSeekBarApp: App {
     @StateObject private var state = AppState()
+
+    @ViewBuilder
+    private var menuBarWhale: some View {
+        if let colored = WhaleIcon.coloredImage(for: state.probe) {
+            Image(nsImage: colored)
+                .renderingMode(.original)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+        } else if let whale = WhaleIcon.image {
+            Image(nsImage: whale)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+        }
+    }
 
     var body: some Scene {
         MenuBarExtra {
@@ -26,13 +79,11 @@ struct DeepSeekBarApp: App {
         } label: {
             // 不用 Label：NSImage 图标时 Label 在 MenuBarExtra 里可能只渲染图标
             HStack(spacing: 4) {
-                if let whale = WhaleIcon.image {
-                    Image(nsImage: whale)
-                        .resizable()
-                        .interpolation(.high)
-                        .scaledToFit()
-                        .frame(width: WhaleIcon.pointSize, height: WhaleIcon.pointSize)
-                }
+                menuBarWhale
+                    .frame(width: WhaleIcon.pointSize, height: WhaleIcon.pointSize)
+                    .id(state.probe.level)
+                    .accessibilityLabel("API 探测状态")
+                    .accessibilityValue(state.probe.label)
                 Text(state.menuLabel)
             }
         }
