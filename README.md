@@ -13,12 +13,39 @@ macOS 菜单栏小工具：一眼看清 DeepSeek 账户余额、消费用量与�
 
 无需 Xcode，只需 Command Line Tools（`xcode-select --install`）：
 
+### 编译并打包 App
+
+在项目根目录执行：
+
 ```bash
-./build_app.sh        # release 编译并打包 DeepSeekBar.app（ad-hoc 签名）
-open DeepSeekBar.app  # 启动，出现在菜单栏
+./build_app.sh
 ```
 
-开机自启：在 App 设置中开启“登录时自动启动”。请先将 `DeepSeekBar.app` 放在稳定位置（建议 `/Applications`）再开启，避免移动 App 后登录项失效。
+该脚本会依次完成 `swift build -c release`、App 目录打包和本地 ad-hoc 签名。构建产物位于：
+
+- App：`<项目根目录>/DeepSeekBar.app`
+- App 内可执行文件：`<项目根目录>/DeepSeekBar.app/Contents/MacOS/DeepSeekBar`
+- SwiftPM 中间产物：`<项目根目录>/.build/release/DeepSeekBar`
+
+每次重新执行 `./build_app.sh`，都会重新生成项目根目录下的 `DeepSeekBar.app`。
+
+### 不安装，临时打开使用
+
+无需复制到 `/Applications`。构建完成后，在项目根目录直接执行：
+
+```bash
+open ./DeepSeekBar.app
+```
+
+App 启动后不会显示普通窗口，而是出现在 macOS 菜单栏；点击鲸鱼图标即可使用。退出时点击弹出页面底部的电源按钮。
+
+如果需要在终端中直接观察运行日志，也可以以前台方式启动；按 `Control-C` 退出：
+
+```bash
+./DeepSeekBar.app/Contents/MacOS/DeepSeekBar
+```
+
+临时使用时不建议开启“登录时自动启动”。如需开机自启，请先将 `DeepSeekBar.app` 放在稳定位置（建议 `/Applications`），再在 App 设置中开启，避免移动或删除 App 后登录项失效。
 
 > “今日累计 Token”折线由 App 在每次成功刷新时采样，并保留当天记录；DeepSeek 平台接口本身不提供分钟级历史。
 
