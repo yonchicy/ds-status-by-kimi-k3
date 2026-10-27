@@ -1,7 +1,10 @@
 import Combine
 import DeepSeekBarCore
+import DeepSeekBarWidgetBridge
+import DeepSeekBarWidgetShared
 import Foundation
 import SwiftUI
+import WidgetKit
 
 @MainActor
 final class AppState: ObservableObject {
@@ -15,6 +18,14 @@ final class AppState: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var todayUsageSamples: [TodayUsageSample] = []
+    @Published private(set) var widgetSyncError: String?
+    @Published private(set) var widgetLastSynced: Date?
+    @Published private(set) var isWidgetBridgeReady = false
+
+    var supportsDesktopWidgets: Bool {
+        guard let plugins = Bundle.main.builtInPlugInsURL else { return false }
+        return FileManager.default.fileExists(atPath: plugins.appendingPathComponent("DeepSeekBarWidget.appex").path)
+    }
 
     // 设置
     @Published var refreshIntervalMinutes: Int {
@@ -33,12 +44,14 @@ final class AppState: ObservableObject {
     }
 
     private let client = DeepSeekClient.shared
+    private let widgetServer = WidgetSnapshotServer()
     private var timer: Timer?
     private var cancellables = Set<AnyCancellable>()
     private var refreshGeneration = 0
     private var refreshPending = false
     private var usageSnapshotDayKey: String?
     private var usageSnapshotTimeZoneIdentifier: String?
+    private var usageUpdatedAt: Date?
     private var todayUsageSeries = TodayUsageSeries()
     private static let todayUsageSeriesKey = "todayUsageSeries.v1"
 
@@ -54,6 +67,7 @@ final class AppState: ObservableObject {
         appearancePreference.applyToApp()
         loadTodayUsageSeries()
         observeCalendarChanges()
+        startWidgetBridge()
         restartTimer()
         Task { await refresh() }
     }
@@ -79,6 +93,7 @@ final class AppState: ObservableObject {
         defer {
             isRefreshing = false
             lastUpdated = Date()
+            synchronizeWidget()
         }
 
         repeat {
@@ -130,7 +145,8 @@ final class AppState: ObservableObject {
             let fetched = try await client.fetchUsageSummary(
                 platformToken: token,
                 now: requestedAt,
-                timeZone: timeZone)
+                timeZone: timeZone,
+                preferredCurrency: balance?.currency ?? "CNY")
             guard generation == refreshGeneration else { return }
 
             let completedAt = Date()
@@ -149,6 +165,7 @@ final class AppState: ObservableObject {
             usage = fetched
             usageSnapshotDayKey = completedDay
             usageSnapshotTimeZoneIdentifier = timeZone.identifier
+            usageUpdatedAt = completedAt
             usageState = .available
             todayUsageSeries.record(
                 tokens: fetched.todayTokens,
@@ -185,7 +202,13 @@ final class AppState: ObservableObject {
 
     func saveAPIKey(_ key: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed != (apiKey ?? "") {
+            balance = nil
+            balanceError = nil
+            probe = .unknown
+        }
         if trimmed.isEmpty { KeychainStore.delete(.apiKey) } else { KeychainStore.save(trimmed, for: .apiKey) }
+        synchronizeWidget()
         invalidateAndRefresh()
     }
 
@@ -200,6 +223,7 @@ final class AppState: ObservableObject {
             clearTodayUsageHistory()
         }
         if trimmed.isEmpty { KeychainStore.delete(.platformToken) } else { KeychainStore.save(trimmed, for: .platformToken) }
+        synchronizeWidget()
         invalidateAndRefresh()
     }
 
@@ -212,7 +236,10 @@ final class AppState: ObservableObject {
         usageSnapshotTimeZoneIdentifier = nil
         usageState = .idle
         balanceError = nil
+        probe = .unknown
+        statusPage = .unknown
         clearTodayUsageHistory()
+        synchronizeWidget()
         invalidateCurrentRefresh()
     }
 
@@ -286,7 +313,81 @@ final class AppState: ObservableObject {
         usageSnapshotTimeZoneIdentifier = nil
         usageState = hasPlatformToken ? .loading : .idle
         refreshTodayUsageDay(now: now)
+        synchronizeWidget()
         invalidateAndRefresh()
+    }
+
+    // MARK: - 桌面小组件（只共享展示快照，不共享凭据）
+
+    private func startWidgetBridge() {
+        guard supportsDesktopWidgets else { return }
+        widgetServer.start { [weak self] result in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.isWidgetBridgeReady = true
+                    self.widgetSyncError = nil
+                    self.synchronizeWidget()
+                case .failure:
+                    self.isWidgetBridgeReady = false
+                    self.widgetSyncError = "小组件连接失败，请退出其他 DeepSeekBar 实例后重新启动。"
+                }
+            }
+        }
+        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
+            .sink { [weak self] _ in self?.widgetServer.stop() }
+            .store(in: &cancellables)
+    }
+
+    private func synchronizeWidget() {
+        guard supportsDesktopWidgets else { return }
+        var snapshot = WidgetSnapshot()
+        snapshot.refreshIntervalMinutes = refreshIntervalMinutes
+        snapshot.balanceState = !hasAPIKey ? .needsSetup
+            : (balanceError == nil && balance != nil ? .available : .unavailable)
+        if let balance {
+            snapshot.balance = .init(currency: balance.currency, total: balance.total,
+                                     isAvailable: balance.isAvailable, updatedAt: balance.updatedAt)
+        }
+        switch usageState {
+        case .idle: snapshot.usageState = .needsSetup
+        case .tokenExpired: snapshot.usageState = .expired
+        case .unavailable: snapshot.usageState = .unavailable
+        case .loading: snapshot.usageState = usage == nil ? .unavailable : .available
+        case .available: snapshot.usageState = .available
+        }
+        if let usage, let usageUpdatedAt, let usageSnapshotTimeZoneIdentifier {
+            snapshot.usage = .init(
+                currency: usage.currency, todayCost: usage.todayCost, todayTokens: usage.todayTokens,
+                monthCost: usage.monthCost, updatedAt: usageUpdatedAt,
+                timeZoneIdentifier: usageSnapshotTimeZoneIdentifier)
+        }
+        snapshot.probeLevel = probe.level
+        // Do not pass arbitrary server error bodies across the display-only bridge.
+        snapshot.probeLabel = probe.level == 3 ? "探测异常" : probe.label
+        switch statusPage {
+        case .unknown, .undetermined:
+            snapshot.officialLevel = 0
+            snapshot.officialLabel = "未能判定"
+        case .noIncident:
+            snapshot.officialLevel = 1
+            snapshot.officialLabel = "一切运行正常"
+        case .unreachable:
+            snapshot.officialLevel = 2
+            snapshot.officialLabel = "无法访问"
+        case .incident:
+            snapshot.officialLevel = 3
+            snapshot.officialLabel = "存在故障 / 降级"
+        }
+        let publishedAt = snapshot.generatedAt
+        widgetServer.publish(snapshot) { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.isWidgetBridgeReady else { return }
+                self.widgetLastSynced = publishedAt
+                WidgetCenter.shared.reloadTimelines(ofKind: WidgetSnapshot.kind)
+            }
+        }
     }
 
     private func invalidateCurrentRefresh() {

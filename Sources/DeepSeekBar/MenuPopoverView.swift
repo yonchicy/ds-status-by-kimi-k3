@@ -4,25 +4,53 @@ import SwiftUI
 
 /// 菜单栏下拉弹窗主体
 struct MenuPopoverView: View {
+    var refreshOnAppear = true
     @EnvironmentObject var state: AppState
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
     @State private var hoveredTodayUsageSample: TodayUsageSample?
     @State private var hoveredDailyUsage: DailyUsage?
+    @State private var accountContentHeight: CGFloat = 400
+
+    private var maximumContentHeight: CGFloat {
+        max(246, min(686, (NSScreen.main?.visibleFrame.height ?? 860) - 174))
+    }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ScrollView {
+                accountContent
+                    .fixedSize(horizontal: false, vertical: true)
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: AccountContentHeightKey.self, value: proxy.size.height)
+                        }
+                    }
+            }
+            // MenuBarExtra 以固有尺寸创建窗口；仅设 maxHeight 会让滚动区折叠为零。
+            .frame(height: min(accountContentHeight, maximumContentHeight))
+            .scrollIndicators(.visible)
+            .onPreferenceChange(AccountContentHeightKey.self) { height in
+                if height > 0, height.isFinite { accountContentHeight = height }
+            }
+            Divider()
+            footer
+        }
+        .padding(14)
+        .frame(width: 320)
+        .onAppear {
+            if refreshOnAppear { state.refreshForPresentation() }
+        }
+    }
+
+    private var accountContent: some View {
         VStack(alignment: .leading, spacing: 14) {
             balanceSection
             Divider()
             usageSection
             Divider()
             statusSection
-            Divider()
-            footer
         }
-        .padding(14)
-        .frame(width: 320)
-        .onAppear { state.refreshForPresentation() }
     }
 
     // MARK: - 余额
@@ -113,8 +141,9 @@ struct MenuPopoverView: View {
                     Text("\(u.symbol)\(u.monthCost, specifier: "%.4f") · \(AppState.formatTokens(u.monthTokens)) tokens")
                 }
                 GridRow {
-                    Text("本月请求").foregroundStyle(.secondary)
+                    Text("模型请求").foregroundStyle(.secondary)
                     Text("\(u.monthRequests) 次")
+                        .help("本月模型请求数；Search / Fetch 调用次数单独列在下方")
                 }
                 if let rate = u.cacheHitRate {
                     GridRow {
@@ -130,6 +159,8 @@ struct MenuPopoverView: View {
                 }
             }
             .font(.callout)
+
+            ToolUsageView(symbol: u.symbol, usage: u.toolUsage)
 
             todayUsageChart
 
@@ -472,4 +503,11 @@ struct MenuPopoverView: View {
         }
     }
 
+}
+
+private struct AccountContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
 }

@@ -53,7 +53,9 @@ enum WhaleIcon {
 
 @main
 struct DeepSeekBarApp: App {
+    @NSApplicationDelegateAdaptor(WidgetAppDelegate.self) private var appDelegate
     @StateObject private var state = AppState()
+    @AppStorage("showMenuBar") private var showMenuBar = true
 
     @ViewBuilder
     private var menuBarWhale: some View {
@@ -72,7 +74,7 @@ struct DeepSeekBarApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra {
+        MenuBarExtra(isInserted: $showMenuBar) {
             MenuPopoverView()
                 .environmentObject(state)
                 .appAppearance(state.appearancePreference)
@@ -89,6 +91,8 @@ struct DeepSeekBarApp: App {
         }
         .menuBarExtraStyle(.window)
 
+        OverviewScene(delegate: appDelegate, state: state)
+
         Window("登录 DeepSeek 平台", id: "login") {
             LoginWindowView()
                 .environmentObject(state)
@@ -101,6 +105,29 @@ struct DeepSeekBarApp: App {
             SettingsView()
                 .environmentObject(state)
                 .appAppearance(state.appearancePreference)
+        }
+    }
+}
+
+private struct OverviewScene: Scene {
+    @ObservedObject var delegate: WidgetAppDelegate
+    @ObservedObject var state: AppState
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Scene {
+        Window("DeepSeekBar 账户概览", id: "overview") {
+            MenuPopoverView(refreshOnAppear: false)
+            .environmentObject(state)
+            .appAppearance(state.appearancePreference)
+        }
+        .windowResizability(.contentSize)
+        // Scene observation stays alive even when the menu bar label is removed.
+        .onChange(of: delegate.overviewRequested, initial: true) { _, requested in
+            guard requested else { return }
+            state.refreshForPresentation()
+            openWindow(id: "overview")
+            NSApp.activate(ignoringOtherApps: true)
+            delegate.overviewRequested = false
         }
     }
 }

@@ -356,92 +356,54 @@ let utcLateAfternoon = gregorian.date(from: DateComponents(
 todaySeries.record(tokens: 9, at: utcLateAfternoon, timeZone: shanghai)
 check(todaySeries.dayKey == "2026-08-14", "采样日期遵循指定时区", "实际 \(todaySeries.dayKey ?? "nil")")
 
-print("▶ 近 7 日请求编排")
+print("▶ 近 7 日新版请求编排")
 let requestRecorder = RequestRecorder()
+let orchestrationTimeZone = gregorian.timeZone
 let orchestrationClient = DeepSeekClient { request in
-    guard let url = request.url,
-          let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-          let month = components.queryItems?.first(where: { $0.name == "month" })?.value,
-          let year = components.queryItems?.first(where: { $0.name == "year" })?.value else {
-        throw DeepSeekError.parseFailed("selftest request")
+    guard let url = request.url else { throw DeepSeekError.parseFailed("selftest request") }
+    await requestRecorder.append(url.path)
+    var buckets: [[String: Any]] = []
+    for (date, count) in [("2026-07-28", 28), ("2026-07-29", 29), ("2026-07-30", 30),
+                          ("2026-07-31", 31), ("2026-08-01", 101), ("2026-08-03", 103)] {
+        let timestamp = ISO8601DateFormatter().date(from: date + "T00:00:00Z")!.timeIntervalSince1970
+        buckets.append(["time": timestamp, "usage": ["RESPONSE_TOKEN": count]])
     }
-    let key = "\(url.path)?year=\(year)&month=\(month)"
-    await requestRecorder.append(key)
-
-    let body: String
-    switch (url.path, year, month) {
-    case ("/api/v0/usage/amount", "2026", "7"):
-        body = julyAmountJSON
-    case ("/api/v0/usage/amount", "2026", "8"):
-        body = augustAmountJSON
-    case ("/api/v0/usage/cost", "2026", "8"):
-        body = augustCostJSON
+    let payload: [String: Any]
+    switch url.path {
+    case "/api/v0/usage/by_api_key/amount":
+        payload = ["series": [["model": "deepseek-flash", "buckets": buckets]], "function_series": []]
+    case "/api/v0/usage/by_api_key/cost":
+        payload = ["data": [["currency": "CNY", "series": [], "function_series": []]]]
     default:
-        throw DeepSeekError.apiError("unexpected request: \(key)")
+        throw DeepSeekError.apiError("unexpected request path")
     }
-    let response = HTTPURLResponse(
-        url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
-    return (Data(body.utf8), response)
+    let body = try JSONSerialization.data(withJSONObject: [
+        "code": 0, "data": ["biz_code": 0, "biz_data": payload]
+    ])
+    return (body, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
 }
 let orchestrationSemaphore = DispatchSemaphore(value: 0)
-let orchestrationTimeZone = gregorian.timeZone
 Task.detached {
     do {
         let summary = try await orchestrationClient.fetchUsageSummary(
-            platformToken: "selftest-token",
-            now: monthBoundaryNow,
-            timeZone: orchestrationTimeZone)
-        let chartDays = summary.last7CalendarDays(
-            endingOn: monthBoundaryNow,
-            timeZone: orchestrationTimeZone)
+            platformToken: "selftest-token", now: monthBoundaryNow, timeZone: orchestrationTimeZone)
+        let chartDays = summary.last7CalendarDays(endingOn: monthBoundaryNow, timeZone: orchestrationTimeZone)
         let requests = await requestRecorder.snapshot()
         let expectedRequests: Set<String> = [
-            "/api/v0/usage/amount?year=2026&month=7",
-            "/api/v0/usage/amount?year=2026&month=8",
-            "/api/v0/usage/cost?year=2026&month=8",
+            "/api/v0/usage/by_api_key/amount", "/api/v0/usage/by_api_key/cost"
         ]
-        check(
-            requests.count == expectedRequests.count && Set(requests) == expectedRequests,
-            "跨月时请求上月/本月 token 与本月消费",
-            "实际 \(requests.sorted())")
-        check(
-            chartDays.map(\.tokens) == [28, 29, 30, 31, 101, 0, 103],
-            "请求响应进入 7 日图表",
-            "实际 \(chartDays.map(\.tokens))")
-        check(summary.todayTokens == 103, "today 日期键与图表一致")
+        check(requests.count == 2 && Set(requests) == expectedRequests,
+              "跨月仍只请求一次用量和一次消费")
+        check(chartDays.map(\.tokens) == [28, 29, 30, 31, 101, 0, 103],
+              "新版响应覆盖完整近 7 日，缺失日期补零")
+        check(summary.todayTokens == 103 && summary.monthTokens == 204,
+              "上月图表数据不污染今日与本月摘要")
     } catch {
         check(false, "请求编排测试异常", error.localizedDescription)
     }
     orchestrationSemaphore.signal()
 }
 orchestrationSemaphore.wait()
-
-let fallbackClient = DeepSeekClient { request in
-    guard let url = request.url,
-          let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-          let month = components.queryItems?.first(where: { $0.name == "month" })?.value else {
-        throw DeepSeekError.parseFailed("fallback selftest request")
-    }
-    if month == "7" { throw URLError(.timedOut) }
-    let body = url.path.hasSuffix("/amount") ? augustAmountJSON : augustCostJSON
-    let response = HTTPURLResponse(
-        url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
-    return (Data(body.utf8), response)
-}
-let fallbackSemaphore = DispatchSemaphore(value: 0)
-Task.detached {
-    do {
-        let summary = try await fallbackClient.fetchUsageSummary(
-            platformToken: "selftest-token",
-            now: monthBoundaryNow,
-            timeZone: orchestrationTimeZone)
-        check(summary.monthTokens == 600, "上月请求失败时仍保留本月摘要")
-    } catch {
-        check(false, "上月请求失败不应拖垮本月摘要", error.localizedDescription)
-    }
-    fallbackSemaphore.signal()
-}
-fallbackSemaphore.wait()
 
 let januaryBoundary = gregorian.date(from: DateComponents(
     timeZone: gregorian.timeZone,
@@ -540,6 +502,11 @@ if CommandLine.arguments.contains("--network") {
     }
     semaphore.wait()
 }
+
+runModelSupportTests()
+runSearchBillingTests()
+runWidgetTests()
+if CommandLine.arguments.contains("--widget-bridge") { runWidgetBridgeTests() }
 
 print(failures.value == 0 ? "\n全部通过 ✅" : "\n\(failures.value) 项失败 ❌")
 exit(failures.value == 0 ? 0 : 1)

@@ -125,15 +125,40 @@ public struct TodayModelUsage: Equatable, Sendable {
     }
 }
 
+/// Search / Fetch 按次计量；消费金额取平台账单，不用请求数乘本地单价估算。
+public struct ToolUsage: Equatable, Sendable {
+    public var requests: Int
+    public var cost: Double
+
+    public init(requests: Int = 0, cost: Double = 0) {
+        self.requests = requests
+        self.cost = cost
+    }
+}
+
+public struct ToolUsageSummary: Equatable, Identifiable, Sendable {
+    public var id: String { name }
+    public var name: String
+    public var today: ToolUsage
+    public var month: ToolUsage
+
+    public init(name: String, today: ToolUsage = .init(), month: ToolUsage = .init()) {
+        self.name = name
+        self.today = today
+        self.month = month
+    }
+}
+
 public struct UsageSummary: Equatable {
     public var currency: String
     public var todayTokens: Int
     public var todayCost: Double
     public var todayFlashUsage: TodayModelUsage
     public var todayProUsage: TodayModelUsage
+    public var toolUsage: [ToolUsageSummary] = []
     public var monthTokens: Int
     public var monthCost: Double
-    public var monthRequests: Int
+    public var monthRequests: Int    // 模型请求；Search / Fetch 单独计数
     public var topModel: String?
     public var cacheHitRate: Double?   // 本月缓存命中率 0...1
     public var daily: [DailyUsage]

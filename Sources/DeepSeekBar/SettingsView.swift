@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject var state: AppState
     @Environment(\.openWindow) private var openWindow
+    @AppStorage("showMenuBar") private var showMenuBar = true
 
     @State private var apiKeyInput = ""
     @State private var tokenInput = ""
@@ -43,6 +44,32 @@ struct SettingsView: View {
             Section("刷新") {
                 Stepper("每 \(state.refreshIntervalMinutes) 分钟自动刷新",
                         value: $state.refreshIntervalMinutes, in: 1...60)
+            }
+
+            Section("菜单栏") {
+                Toggle("显示菜单栏图标和用量", isOn: $showMenuBar)
+                Text("关闭后，应用仍在后台刷新桌面小组件。点击小组件或重新打开 DeepSeekBar，再点击账户概览底部的设置按钮，即可恢复显示。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("桌面小组件") {
+                if state.supportsDesktopWidgets {
+                    Text("右键点击桌面 → 编辑小组件 → 搜索 DeepSeekBar，选择小号或中号添加。")
+                        .font(.callout)
+                    Text("请保持应用在后台运行以同步数据。系统会安排小组件的实际刷新时间；点击小组件可打开账户概览。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let error = state.widgetSyncError {
+                        Text(error).font(.caption).foregroundStyle(.orange)
+                    } else if let date = state.widgetLastSynced {
+                        Text("数据已同步：\(date, style: .time)")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Button("刷新并同步小组件") { Task { await state.refresh() } }
+                        .disabled(state.isRefreshing)
+                } else {
+                    Text("当前版本未包含桌面小组件，请重新构建并安装完整版应用。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
 
             Section {
