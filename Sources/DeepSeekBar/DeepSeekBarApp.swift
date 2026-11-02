@@ -87,6 +87,7 @@ struct DeepSeekBarApp: App {
                     .accessibilityLabel("API 探测状态")
                     .accessibilityValue(state.probe.label)
                 Text(state.menuLabel)
+                    .monospacedDigit()
             }
         }
         .menuBarExtraStyle(.window)

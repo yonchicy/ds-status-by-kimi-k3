@@ -402,9 +402,10 @@ final class AppState: ObservableObject {
 
     // MARK: - 菜单栏标题
 
-    /// 优先显示「今日消费 · 今日 tokens」；未配置/未取到平台用量时回退到总余额；再不行显示占位
+    /// 优先显示「今日消费 · 今日 tokens」；刷新或暂时失败时保留上次用量，收到新数据后直接替换。
+    /// 未配置/未取到平台用量时回退到总余额；再不行显示占位。
     var menuLabel: String {
-        if let u = usage, usageState == .available {
+        if let u = usage {
             return "\(u.symbol)\(Self.formatCost(u.todayCost)) · \(Self.formatTokens(u.todayTokens))"
         }
         if let b = balance {
